@@ -185,7 +185,7 @@ function linkchecker_menu_form_linkchecker_admin_settings_form_alter(&$form, &$f
   $form['settings']['linkchecker_scan_menus'] = array(
     '#title' => t('Scan menus for links'),
     '#type' => 'checkboxes',
-    '#description' => t('Enable this checkbox if links in menus should be checked.'),
+    '#description' => t('Enable link checking for the selected menu(s).'),
     '#options' => array_map('check_plain', menu_get_menus()),
     '#default_value' => variable_get('linkchecker_scan_menus', array()),
     '#weight' => -1,
