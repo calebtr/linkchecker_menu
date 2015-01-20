@@ -1,0 +1,37 @@
+<?php
+
+/**
+ * Implements hook_uninstall().
+ */
+function linkchecker_menu_uninstall() {
+  variable_del('linkchecker_scan_menus');
+}
+
+/**
+ * Implements hook_schema(). 
+ */
+function linkchecker_menu_schema() {
+  $schema['linkchecker_menu'] = array(
+    'description' => 'Stores all link references for menu items.',
+    'fields' => array(
+      'mlid' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'description' => 'Primary Key: Unique {linkchecker_link}.mlid.',
+      ),
+      'lid' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'description' => 'Foreign Key: Unique {linkchecker_link}.lid.',
+      ),
+    ),
+    'primary key' => array('mlid'),
+    'foreign keys' => array(
+      'lid' => array('linkchecker_link' => 'lid'),
+      'mlid' => array('menu_links' => 'mlid'),
+    ),
+    'indexes' => array('lid' => array('lid')),   
+  );
+
+  return $schema;
+}

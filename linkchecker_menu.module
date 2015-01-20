@@ -1,0 +1,511 @@
+<?php
+
+define('LINKCHECKER_LINK_TYPE_ALL', 0);
+define('LINKCHECKER_LINK_TYPE_EXTERNAL', 1); 
+define('LINKCHECKER_LINK_TYPE_INTERNAL', 2);
+
+
+/**
+ * Helper function adds menu links to database.
+ */ 
+function _linkchecker_menu_add_menu_links($item) {
+
+  $url = $item['link_path'];
+  // Check that the DB doesn't have this link already.
+  $urlhash = drupal_hash_base64($url);
+  $link = db_query('SELECT lid FROM {linkchecker_link} WHERE urlhash = :urlhash', array(':urlhash' => $urlhash))->fetchObject();
+  if (!$link) {
+    $link = new stdClass();
+    $link->urlhash = $urlhash;
+    $link->url = $url;
+    $link->status = _linkchecker_link_check_status_filter($url);
+    drupal_write_record('linkchecker_link', $link);
+  }
+
+  // build the record
+  $menu_link = array('mlid' => $item['mlid'], 'lid' => $link->lid);
+
+  // check to see if this id exists in the table alrady
+  $count = db_query('SELECT mlid FROM {linkchecker_menu} WHERE mlid = :mlid', array(':mlid' => $item['mlid']))->rowCount();
+
+  // id exists - update
+  if ($count) {
+    drupal_write_record('linkchecker_menu', $menu_link, 'mlid');
+  }
+  // no id - insert
+  else {
+    drupal_write_record('linkchecker_menu', $menu_link);
+  }
+}
+
+
+/**
+ * Adds links to database in a batch.
+ */
+function _linkchecker_menu_batch_import_menus($menus) {
+  global $base_url;
+  $linkchecker_links_type = variable_get('linkchecker_check_links_types', 1);
+
+  $operations = array();
+  foreach ($menus as $menu) {
+    $links = menu_load_links($menu);
+    foreach ($links as $link) {
+      if ($link['link_path'] == '<front>') {
+        continue;
+      }
+      $link_type = LINKCHECKER_LINK_TYPE_INTERNAL;
+      if (empty($link['router_path'])) {
+        $link_type = LINKCHECKER_LINK_TYPE_EXTERNAL;
+      }
+      if ($linkchecker_links_type == LINKCHECKER_LINK_TYPE_ALL || $linkchecker_links_type == $link_type) {
+
+        // Validate urls, code from linkchecker.module
+        $url_decoded = $link['link_path'];
+
+        // Prefix protocol relative urls with a protocol to allow link checking.
+        if (preg_match('!^//!', $url_decoded)) {
+          $http_protocol = $is_https ? 'https' : 'http';
+          $url_decoded = $http_protocol . ':' . $url_decoded;
+        }
+
+        if ($link_type == LINKCHECKER_LINK_TYPE_INTERNAL) {
+          $url_decoded = $base_url . '/' . $url_decoded;
+        }
+
+        $url_encoded = str_replace(' ', '%20', $url_decoded);
+
+        $link['link_path'] = $url_decoded;
+
+        // Fully qualified URLS
+        if (valid_url($url_encoded, TRUE)) {
+          $operations[] = array('_linkchecker_menu_batch_menu_import_op', array($link));
+        }
+      }
+    }
+  }
+
+  $batch = array(
+    'file' => drupal_get_path('module', 'linkchecker_menu') . '/linkchecker_menu.module',
+    'finished' => '_linkchecker_menu_batch_menu_import_finished',
+    'operations' => $operations,
+    'title' => t('Scanning for links'),
+  );
+
+  return $batch;
+}
+
+/**
+ * Run single menu link extraction.
+ *
+ * @param array $item
+ * Menu item
+ * @param array $context
+ * Batch context array.
+ */
+function _linkchecker_menu_batch_menu_import_op($item, &$context) {
+  // Add the menu link
+  _linkchecker_menu_add_menu_links($item);
+
+  // Store results for post-processing in the finished callback.
+  $context['results'][] = $item['mlid'];
+  $context['message'] = t('Menu item: @title', array('@title' => $item['link_title']));
+}
+
+/**
+ * Output menu batch result messages.
+ *
+ * @param bool $success
+ * If scan completed successfully or not.
+ * @param int $results
+ * Number of nodes scanned.
+ * @param array $operations
+ * Array of functions called.
+ */
+function _linkchecker_menu_batch_menu_import_finished($success, $results, $operations) {
+  if ($success) {
+    $message = format_plural(count($results), 'One menu item has been scanned.', '@count menu items have been scanned.');
+  }
+  else {
+    $message = t('Scanning for links in menus has failed with an error.');
+  }
+  drupal_set_message($message);
+}
+
+
+/**
+ * Implements hook_menu_link_insert(). Adds the link to the list of links to be checked.
+ */ 
+function linkchecker_menu_menu_link_insert($item) {
+  // Make sure that this item is in one of the menus we are checking links for
+  $menus = array_filter(variable_get('linkchecker_scan_menus', array()));
+  if (isset($menus[$item['menu_name']])) {
+    _linkchecker_menu_add_menu_links($item);
+  }
+}
+
+
+/**
+ * Implements hook_menu_link_update(). Updates the link in the list of links to be 
+ * checked.
+ */ 
+function linkchecker_menu_menu_link_update($item) {
+  // Make sure that this item is in one of the menus we are checking links for
+  $menus = array_filter(variable_get('linkchecker_scan_menus', array()));
+  if (isset($menus[$item['menu_name']])) {
+    _linkchecker_menu_add_menu_links($item);
+  }
+}
+
+
+/**
+ * Implements hook_menu_link_delete(). Remove the link from the list of links to be 
+ * checked.
+ */ 
+function linkchecker_menu_menu_link_delete($item) {
+  // Make sure that this item is in one of the menus we are checking links for
+  $menus = array_filter(variable_get('linkchecker_scan_menus', array()));
+  if (isset($menus[$item['menu_name']])) {
+    _linkchecker_menu_delete_menu_links($item['mlid']);
+  }
+}
+
+/**
+ * Deletes references to links in the linkchecker_menu table.
+ */
+function _linkchecker_menu_delete_menu_links($mlid) {
+  db_delete('linkchecker_menu')
+    ->condition('mlid', $mlid)
+    ->execute();
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter for linkchecker_admin_settings_form.
+ */
+function linkchecker_menu_form_linkchecker_admin_settings_form_alter(&$form, &$form_state, $form_id) {
+  $form['settings']['linkchecker_scan_menus'] = array(
+    '#title' => t('Scan menus for links'),
+    '#type' => 'checkboxes',
+    '#description' => t('Enable this checkbox if links in menus should be checked.'),
+    '#options' => array_map('check_plain', menu_get_menus()),
+    '#default_value' => variable_get('linkchecker_scan_menus', array()),
+    '#weight' => -1,
+  );
+
+  $form['#submit'][] = 'linkchecker_menu_admin_settings_form_submit';
+  $form['clear']['linkchecker_analyze'] = array(
+    '#type' => 'submit',
+    '#value' => t('Reanalyze content for links'),
+    '#submit' => array('linkchecker_menu_analyze_links_submit'),
+  );
+  $form['clear']['linkchecker_clear_analyze'] = array(
+    '#type' => 'submit',
+    '#value' => t('Clear link data and analyze content for links'),
+    '#submit' => array('linkchecker_menu_clear_analyze_links_submit'),
+  );
+}
+
+/**
+ * Submit callback for linkchecker_admin_settings_form.
+ */
+function linkchecker_menu_admin_settings_form_submit($form, &$form_state) {
+
+  // Re-scan items, if menu types have been changed.
+  $additional_menus_selected = array_diff($form_state['values']['linkchecker_scan_menus'], $form['settings']['linkchecker_scan_menus']['#default_value']);
+  if (!empty($additional_menus_selected)) {
+    batch_set(_linkchecker_menu_batch_import_menus($additional_menus_selected));
+  }
+  
+  // Remove items, if menu types have been changed.
+  $deselected_menus = array_diff($form['settings']['linkchecker_scan_menus']['#default_value'], $form_state['values']['linkchecker_scan_menus']);
+  if (!empty($deselected_menus)) {
+    foreach ($deselected_menus as $menu) {
+      $links = menu_load_links($menu);
+      $mlids = array_map('_linkchecker_menu_extract_mlid', $links);
+      $query = db_delete('linkchecker_menu')
+        ->condition('mlid', $mlids, 'in')->execute();
+        dsm($mlids);
+    }
+  }
+  
+}
+
+/**
+ * Helper function to extract menu link ids from list of menu items
+ */
+function _linkchecker_menu_extract_mlid($item) {
+  return $item['mlid'];
+}
+
+/**
+ * Implements hook_menu_alter() to override Linkchecker's default report callback.
+ */
+function linkchecker_menu_menu_alter(&$items) {
+  $items['admin/reports/linkchecker']['page callback'] = 'linkchecker_menu_admin_report_page';
+}
+
+
+/**
+ * Replaces Linkchecker's menu callback for general reporting.
+ */
+function linkchecker_menu_admin_report_page() {
+
+  $ignore_response_codes = preg_split('/(\r\n?|\n)/', variable_get('linkchecker_ignore_response_codes', "200\n206\n302\n304\n401\n403"));
+
+  // Search for broken links in nodes and comments and blocks of all users.
+  // @todo Try to make UNION'ed subselect resultset smaller.
+  $subquery5 = db_select('linkchecker_menu', 'lm')
+    ->distinct()
+    ->fields('lm', array('lid'));
+
+  $subquery4 = db_select('linkchecker_node', 'ln')
+    ->distinct()
+    ->fields('ln', array('lid'));
+
+  $subquery3 = db_select('linkchecker_comment', 'lc')
+    ->distinct()
+    ->fields('lc', array('lid'));
+
+  $subquery2 = db_select('linkchecker_block_custom', 'lb')
+    ->distinct()
+    ->fields('lb', array('lid'));
+
+  // UNION all linkchecker type tables.
+  $subquery1 = db_select($subquery2->union($subquery3)->union($subquery4)->union($subquery5), 'q1')->fields('q1', array('lid'));
+
+  // Build pager query.
+  $query = db_select('linkchecker_link', 'll')->extend('PagerDefault')->extend('TableSort');
+  $query->innerJoin($subquery1, 'q2', 'q2.lid = ll.lid');
+  $query->fields('ll');
+  $query->condition('ll.last_checked', 0, '<>');
+  $query->condition('ll.status', 1);
+  $query->condition('ll.code', $ignore_response_codes, 'NOT IN');
+
+  return _linkchecker_menu_report_page($query);
+}
+
+
+/**
+ * Implements hook_query_linkcheckerUnion alter. Adds linkchecker_menu to linkchecker
+ * query for cleanup.
+ */
+function linkchecker_menu_query_linkcheckerUnion_alter(QueryAlterableInterface $query) {
+  $subquery = db_select('linkchecker_menu', 'lm')
+    ->distinct()
+    ->fields('lm', array('lid'));
+  $query->union($subquery);
+}
+
+/**
+ * Builds the HTML report page table with pager. Overrides _linkchecker_menu_report_page.
+ *
+ * @param SelectQueryInterface $query
+ *   The pager query for the report page. Can be per user report or global.
+ * @param object|null $account
+ *   The user account object.
+ *
+ * @return string
+ *   Themed report page.
+ */
+function _linkchecker_menu_report_page($query, $account = NULL) {
+
+  $links_unchecked = db_query('SELECT COUNT(1) FROM {linkchecker_link} WHERE last_checked = :last_checked AND status = :status', array(':last_checked' => 0, ':status' => 1))->fetchField();
+  if ($links_unchecked > 0) {
+    $links_all = db_query('SELECT COUNT(1) FROM {linkchecker_link} WHERE status = :status', array(':status' => 1))->fetchField();
+    drupal_set_message(format_plural($links_unchecked,
+      'There is 1 unchecked link of about @links_all links in the database. Please be patient until all links have been checked via cron.',
+      'There are @count unchecked links of about @links_all links in the database. Please be patient until all links have been checked via cron.',
+      array('@links_all' => $links_all)), 'warning');
+  }
+
+  $header = array(
+    array('data' => t('URL'), 'field' => 'url', 'sort' => 'desc'),
+    array('data' => t('Response'), 'field' => 'code', 'sort' => 'desc'),
+    array('data' => t('Error'), 'field' => 'error'),
+    array('data' => t('Operations')),
+  );
+
+  $result = $query
+    ->limit(50)
+    ->orderByHeader($header)
+    ->execute();
+
+  // Evaluate permission once for performance reasons.
+  $access_edit_link_settings = user_access('edit link settings');
+  $access_administer_blocks = user_access('administer blocks');
+  $access_administer_redirects = user_access('administer redirects');
+
+  $rows = array();
+  foreach ($result as $link) {
+    // Get the node, block and comment IDs that refer to this broken link and
+    // that the current user has access to.
+    $nids = _linkchecker_link_node_ids($link, $account);
+    $cids = _linkchecker_link_comment_ids($link, $account);
+    $bids = _linkchecker_link_block_ids($link);
+    $mlids = _linkchecker_link_menu_link_id($link);
+    
+    // If the user does not have access to see this link anywhere, do not
+    // display it, for reasons explained in _linkchecker_link_access(). We
+    // still need to fill the table row, though, so as not to throw off the
+    // number of items in the pager.
+    if (empty($nids) && empty($cids) && empty($bids) && empty($mlids)) {
+      $rows[] = array(array('data' => t('Permission restrictions deny you access to this broken link.'), 'colspan' => count($header)));
+      continue;
+    }
+
+    $links = array();
+
+    // Show links to link settings.
+    if ($access_edit_link_settings) {
+      $links[] = l(t('Edit link settings'), 'linkchecker/' . $link->lid . '/edit', array('query' => drupal_get_destination()));
+    }
+
+    // Show link to nodes having this broken link.
+    foreach ($nids as $nid) {
+      $links[] = l(t('Edit node @node', array('@node' => $nid)), 'node/' . $nid . '/edit', array('query' => drupal_get_destination()));
+    }
+
+    // Show link to comments having this broken link.
+    if (module_exists('comment') && variable_get('linkchecker_scan_comments', 0)) {
+      foreach ($cids as $cid) {
+        $links[] = l(t('Edit comment @comment', array('@comment' => $cid)), 'comment/' . $cid . '/edit', array('query' => drupal_get_destination()));
+      }
+    }
+
+    // Show link to blocks having this broken link.
+    if ($access_administer_blocks) {
+      foreach ($bids as $bid) {
+        $links[] = l(t('Edit block @block', array('@block' => $bid)), 'admin/structure/block/manage/block/' . $bid . '/configure', array('query' => drupal_get_destination()));
+      }
+    }
+
+    // Show link to menu items having this broken link.
+    foreach ($mlids as $mlid) {
+      $links[] = l(t('Edit menu item @menu', array('@menu' => $mlid)), 'admin/structure/menu/item/' . $mlid . '/edit', array('query' => drupal_get_destination()));
+    }
+
+    // Show link to redirect this broken internal link.
+    if (module_exists('redirect') && $access_administer_redirects && _linkchecker_is_internal_url($link)) {
+      $links[] = l(t('Create redirection'), 'admin/config/search/redirect/add', array('query' => array('source' => $link->internal, drupal_get_destination())));
+    }
+
+    // Create table data for output.
+    $rows[] = array(
+      'data' => array(
+        l(_filter_url_trim($link->url, 40), $link->url),
+        $link->code,
+        check_plain($link->error),
+        theme('item_list', array('items' => $links)),
+      ),
+    );
+  }
+
+  $build['linkchecker_table'] = array(
+    '#theme' => 'table',
+    '#header' => $header,
+    '#rows' => $rows,
+    '#empty' => t('No broken links have been found.'),
+  );
+  $build['linkchecker_pager'] = array('#theme' => 'pager');
+
+  return $build;
+}
+
+/**
+ * Returns IDs of menu items.
+ *
+ * @param object $link
+ *   An object representing the link to check.
+ *
+ * @return array
+ *   An array of menu link IDs that contain the provided link.
+ */
+function _linkchecker_link_menu_link_id($link) {
+  // Exit if menus are disabled, there is no need to check further.
+  if (!variable_get('linkchecker_scan_menus', 0)) {
+    return array();
+  }
+
+  // Get a list of menu items containing the link
+  $query = db_select('menu_links', 'm');
+  $query->addMetaData('base_table', 'menu_items');
+  $query->innerJoin('linkchecker_menu', 'lm', 'lm.mlid = m.mlid');
+  $query->condition('lm.lid', $link->lid);
+  $query->fields('m', array('mlid'));
+  $mlids = $query->execute()->fetchCol();
+
+  // Return the array of comment IDs.
+  return $mlids;
+}
+
+
+/**
+ * Submit callback. Overrides linkchecker_clear_analyze_links_submit().
+ *
+ * Clear link data and analyze fields in all content types, comments, custom
+ * blocks.
+ */
+function linkchecker_menu_clear_analyze_links_submit($form, &$form_state) {
+  // Exclude unnecessary elements.
+  unset($form_state['values']['linkchecker_analyze'], $form_state['values']['linkchecker_clear_analyze']);
+
+  // Save form settings.
+  system_settings_form_submit($form, $form_state);
+
+  db_truncate('linkchecker_block_custom')->execute();
+  db_truncate('linkchecker_comment')->execute();
+  db_truncate('linkchecker_node')->execute();
+  db_truncate('linkchecker_link')->execute();
+  db_truncate('linkchecker_menu')->execute();
+
+
+  // Start batch and analyze all nodes.
+  $node_types = array_keys(array_filter(variable_get('linkchecker_scan_nodetypes', array())));
+  if (!empty($node_types)) {
+    module_load_include('inc', 'linkchecker', 'linkchecker.batch');
+    batch_set(_linkchecker_batch_import_nodes($node_types));
+    if (variable_get('linkchecker_scan_comments', 0)) {
+      batch_set(_linkchecker_batch_import_comments($node_types));
+    }
+  }
+
+  if (variable_get('linkchecker_scan_blocks', 0)) {
+    module_load_include('inc', 'linkchecker', 'linkchecker.batch');
+    batch_set(_linkchecker_batch_import_block_custom());
+  }
+  
+  if (variable_get('linkchecker_scan_menus', 0)) {
+    batch_set(_linkchecker_menu_batch_import_menus());
+  }
+}
+
+/**
+ * Submit callback. Overrides linkchecker_analyze_links_submit().
+ *
+ * Analyze fields in all node types, comments, custom blocks.
+ */
+function linkchecker_menu_analyze_links_submit($form, &$form_state) {
+  // Exclude unnecessary elements.
+  unset($form_state['values']['linkchecker_analyze'], $form_state['values']['linkchecker_clear_analyze']);
+
+  // Save form settings.
+  system_settings_form_submit($form, $form_state);
+
+  // Start batch and analyze all nodes.
+  $node_types = array_keys(array_filter(variable_get('linkchecker_scan_nodetypes', array())));
+  if (!empty($node_types)) {
+    module_load_include('inc', 'linkchecker', 'linkchecker.batch');
+    batch_set(_linkchecker_batch_import_nodes($node_types));
+    if (variable_get('linkchecker_scan_comments', 0)) {
+      batch_set(_linkchecker_batch_import_comments($node_types));
+    }
+  }
+
+  if (variable_get('linkchecker_scan_blocks', 0)) {
+    module_load_include('inc', 'linkchecker', 'linkchecker.batch');
+    batch_set(_linkchecker_batch_import_block_custom());
+  }
+  
+  if (variable_get('linkchecker_scan_menus', 0)) {
+    batch_set(_linkchecker_menu_batch_import_menus());
+  }
+}

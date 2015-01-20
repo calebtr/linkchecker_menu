@@ -1,1 +1,4 @@
 name = Linkchecker Menu
+description = Extends linkchecker menu to check menu links
+core = 7.x
+dependencies[] = linkchecker
