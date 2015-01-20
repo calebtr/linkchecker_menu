@@ -1,0 +1,12 @@
+diff --git a/linkchecker.module b/linkchecker.module
+index ce283b2..df04a44 100644
+--- a/linkchecker.module
++++ b/linkchecker.module
+@@ -1707,6 +1707,7 @@ function _linkchecker_cleanup_links() {
+   $linkchecker_block_custom = db_select('linkchecker_block_custom', 'lb')
+     ->distinct()
+     ->fields('lb', array('lid'));
++  $linkchecker_block_custom->addTag('linkcheckerUnion');
+ 
+   // UNION all linkchecker type tables.
+   $subquery2 = db_select($linkchecker_block_custom->union($linkchecker_comment)->union($linkchecker_node), 'q1')
